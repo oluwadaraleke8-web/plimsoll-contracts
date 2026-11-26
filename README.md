@@ -56,7 +56,7 @@ Questions, ideas and contributor coordination happen in
 | --- | --- |
 | [`reporter-registry`](contracts/reporter-registry) | Who may speak: auditors, transcribers and supply posters, managed by an admin. |
 | [`coverage-ledger`](contracts/coverage-ledger) | What was said: asset listings, supply snapshots, reserve reports, and the `coverage` / `is_covered` queries. |
-| [`covered-vault`](contracts/covered-vault) | Reference consumer: refuses deposits while the asset is not covered; never blocks withdrawals. |
+| [`covered-vault`](contracts/covered-vault) | Reference consumer: refuses deposits while the asset is not covered; withdrawals are never coverage-gated and can have an admin-configured delay. |
 | [`plimsoll-types`](crates/types) | Shared types, basis-point math and cross-contract client traits. |
 
 ```
