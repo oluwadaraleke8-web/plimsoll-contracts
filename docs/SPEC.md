@@ -149,7 +149,7 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 | Entry | Extended by |
 | --- | --- |
 | `Config`, `Admin`, `WithdrawalDelay` (instance) | `__constructor`, `deposit`, `request_withdraw`, `execute_withdraw`, `set_withdrawal_delay` |
-| `Balance(Address)` (persistent) | `deposit` (write), `request_withdraw`, `execute_withdraw` (write), `balance` (read) |
+| `Balance(Address)` (persistent) | `deposit`, `execute_withdraw` (write), `balance`, `request_withdraw` (read) |
 | `PendingWithdrawal(Address)` (persistent) | `request_withdraw` (write), `execute_withdraw` (read and remove) |
 
 ### Archival behaviour
@@ -518,17 +518,17 @@ rollback should be followed by each reporter posting again.
 ## covered-vault (reference consumer)
 
 A deposit vault for one asset that refuses deposits while the asset is not
-covered. The deployer is the vault admin and can configure a withdrawal delay.
+covered. The deployer supplies the vault admin, who can configure a withdrawal delay.
 Withdrawals are never gated on coverage, but when the delay is non-zero they
 must be requested before they can be executed.
 
 | Function | Auth | Returns | Errors | Event |
 | --- | --- | --- | --- | --- |
-| `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier)` | — | — | — | — |
+| `__constructor(admin: Address, ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier)` | — | — | — | — |
 | `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount, balance_after`, `coverage_dropped {asset}` |
 | `request_withdraw(to: Address, amount: i128)` | to | `u64 available_at` | `InvalidAmount`, `InsufficientBalance`, `InvalidDelay` | `withdrawal_queued {to} amount, available_at` |
 | `execute_withdraw(to: Address)` | to | `i128` new balance | `NoPendingWithdrawal`, `WithdrawalDelayNotElapsed`, `InsufficientBalance` | `withdrawn {to} amount, balance_after` |
-| `set_withdrawal_delay(delay_seconds: u64)` | admin | `()` | — | — |
+| `set_withdrawal_delay(delay_seconds: u64)` | admin | `()` | `InvalidDelay` | — |
 | `withdrawal_delay_seconds()` | — | `u64` | — | — |
 | `balance(of: Address)` | — | `i128` | — | — |
 | `config()` | — | `VaultConfig` | — | — |
@@ -540,7 +540,9 @@ and `available_at = current timestamp + withdrawal_delay_seconds`, then emits
 `withdrawal_queued`. `execute_withdraw` requires the owner's auth, fails until
 the request's `available_at`, then removes the request, transfers the tokens,
 updates the balance, and emits `withdrawn`. A delay of zero is valid but still
-uses the two calls. `set_withdrawal_delay` requires the deployer's auth;
+uses the two calls. The deployer supplies the vault admin as the `admin` constructor argument.
+`set_withdrawal_delay` requires that address's auth and fails with
+`InvalidDelay` if adding the delay to the current timestamp overflows `u64`;
 changing the delay affects newly queued withdrawals and does not change an
 existing request's `available_at`.
 
