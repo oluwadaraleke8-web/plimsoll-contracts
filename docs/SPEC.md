@@ -137,17 +137,20 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 | --- | --- |
 | `Admin`, `Registry`, `Paused` (instance) | `__constructor`, `transfer_admin`, `list_asset`, `post_supply`, `post_reserve`, `pause`, `unpause`, `propose_upgrade`, `execute_upgrade`, `cancel_upgrade` |
 | `Asset(Address)` (persistent) | `list_asset` (write), `get_asset` (read) |
-| `Supply(Address)` (persistent) | `post_supply` (write), `get_supply`, `coverage`, `is_covered`, `coverage_status` (read) |
+| `Supply(Address)` (persistent) | `post_supply` (write), `get_supply`, `coverage`, `is_covered`, `is_covered_at`, `coverage_status` (read) |
+| `SupplyPostedLedger(Address)` (persistent) | `post_supply` (write), `is_covered_at` (read) |
 | `NativeSupply(Address)` (persistent) | `enable_native_supply` (write), `native_supply_token`, `coverage`, `is_covered`, `coverage_status` (read) |
-| `Report(Address, Tier)` (persistent) | `post_reserve` (write), `get_report`, `get_reports`, `coverage`, `is_covered`, `coverage_status` (read) |
+| `Report(Address, Tier)` (persistent) | `post_reserve` (write), `get_report`, `get_reports`, `coverage`, `is_covered`, `is_covered_at`, `coverage_status` (read) |
+| `ReportPostedLedger(Address, Tier, Address)` (persistent) | `post_reserve` (write), `is_covered_at` (read) |
 | `Assets` (persistent) | `list_asset` (write), `asset_reporter_pairs` (read) |
 
 **covered-vault**
 
 | Entry | Extended by |
 | --- | --- |
-| `Config` (instance) | `__constructor`, `deposit`, `withdraw` |
-| `Balance(Address)` (persistent) | `deposit` (write), `withdraw` (write), `balance` (read) |
+| `Config`, `Admin`, `WithdrawalDelay` (instance) | `__constructor`, `deposit`, `request_withdraw`, `execute_withdraw`, `set_withdrawal_delay` |
+| `Balance(Address)` (persistent) | `deposit` (write), `request_withdraw`, `execute_withdraw` (write), `balance` (read) |
+| `PendingWithdrawal(Address)` (persistent) | `request_withdraw` (write), `execute_withdraw` (read and remove) |
 
 ### Archival behaviour
 
@@ -294,6 +297,7 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `asset_reporter_pairs(cursor: Option<u32>, limit: u32)` | — | `Vec<(Address, Address)>` (up to `MAX_PAIRS_PER_CALL = 50` (asset, reporter) pairs) | — | — |
 | `coverage(sac, min_tier: Tier)` | — | `Option<Coverage>` | — | — |
 | `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | `Paused` | — |
+| `is_covered_at(sac, min_bps: u32, max_age: u64, min_tier: Tier, as_of_ledger: u32)` | — | `bool` | `FutureLedger`, `Paused` | — |
 | `coverage_status(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `CoverageStatus` | — | — |
 | `pause()` / `unpause()` | admin | `()` | — | `paused` / `unpaused` `by` |
 | `is_paused()` | — | `bool` | — | — |
@@ -367,6 +371,18 @@ Rules:
   returns `true`. This matters at exact round numbers such as `min_bps = 10_000`
   (100 %): an asset with reserves equal to its circulating supply passes the
   gate.
+- `is_covered_at` evaluates the latest stored supply snapshot and the latest
+  stored report per reporter as they stood no later than `as_of_ledger`. It
+  raises `FutureLedger` when `as_of_ledger` exceeds the executing ledger, and
+  raises `Paused` while the ledger is paused. The target ledger's timestamp is
+  estimated from the current ledger timestamp and the five-second ledger
+  cadence; `max_age` remains in seconds. Historical queries use posted supply
+  snapshots, not a live native-supply token. The ledger does not retain prior
+  versions of replaced snapshots or reports, so it cannot reconstruct a
+  figure that has since been replaced; such a value is excluded if its current
+  stored version was posted after `as_of_ledger`. Entries written before this
+  query was introduced have no posting-ledger metadata and are eligible only
+  for a query at the current ledger.
 
 - `alias_asset(old, new)` creates or replaces the alias mapping `old → new`.
   Both `old` and `new` must be listed assets; `old == new` is rejected with
@@ -502,16 +518,31 @@ rollback should be followed by each reporter posting again.
 ## covered-vault (reference consumer)
 
 A deposit vault for one asset that refuses deposits while the asset is not
-covered. Withdrawals are never blocked.
+covered. The deployer is the vault admin and can configure a withdrawal delay.
+Withdrawals are never gated on coverage, but when the delay is non-zero they
+must be requested before they can be executed.
 
 | Function | Auth | Returns | Errors | Event |
 | --- | --- | --- | --- | --- |
 | `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier)` | — | — | — | — |
-| `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount`, `coverage_dropped {asset}` |
-| `withdraw(to: Address, amount: i128)` | to | `i128` new balance | `InvalidAmount`, `InsufficientBalance` | `withdrawn {to} amount` |
+| `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount, balance_after`, `coverage_dropped {asset}` |
+| `request_withdraw(to: Address, amount: i128)` | to | `u64 available_at` | `InvalidAmount`, `InsufficientBalance`, `InvalidDelay` | `withdrawal_queued {to} amount, available_at` |
+| `execute_withdraw(to: Address)` | to | `i128` new balance | `NoPendingWithdrawal`, `WithdrawalDelayNotElapsed`, `InsufficientBalance` | `withdrawn {to} amount, balance_after` |
+| `set_withdrawal_delay(delay_seconds: u64)` | admin | `()` | — | — |
+| `withdrawal_delay_seconds()` | — | `u64` | — | — |
 | `balance(of: Address)` | — | `i128` | — | — |
 | `config()` | — | `VaultConfig` | — | — |
 | `can_deposit()` | — | `bool` | — | — |
+
+`request_withdraw` replaces any existing request for the same address and
+restarts its delay. It checks the current balance, stores the requested amount
+and `available_at = current timestamp + withdrawal_delay_seconds`, then emits
+`withdrawal_queued`. `execute_withdraw` requires the owner's auth, fails until
+the request's `available_at`, then removes the request, transfers the tokens,
+updates the balance, and emits `withdrawn`. A delay of zero is valid but still
+uses the two calls. `set_withdrawal_delay` requires the deployer's auth;
+changing the delay affects newly queued withdrawals and does not change an
+existing request's `available_at`.
 
 `can_deposit()` makes the same `is_covered(asset, min_bps, max_age,
 min_tier)` call `deposit` makes, with the stored config, and returns its
@@ -538,8 +569,9 @@ therefore cannot learn about a coverage drop from a refused deposit, only from
 the `coverage_dropped` event on one that succeeds, or from `can_deposit()`.
 
 Errors (`VaultError`): `InvalidAmount = 1`, `NotCovered = 2`,
-`InsufficientBalance = 3`. Causes and remedies, and the asset-contract errors a
-vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).
+`InsufficientBalance = 3`, `InvalidDelay = 4`, `NoPendingWithdrawal = 5`,
+`WithdrawalDelayNotElapsed = 6`. Causes and remedies, and the asset-contract
+errors a vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).
 
 ## User flow → function map
 
