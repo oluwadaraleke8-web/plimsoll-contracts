@@ -105,6 +105,19 @@ registered reporter updating their own entry.
 - **Remedy:** Shorten the URL or omit those fields. The `name` field is a
   `Symbol` and is already limited to 32 bytes by the host.
 
+### 6 `InvalidStakeAmount`
+
+- **Raised by:** `top_up_stake(reporter, amount)`, `reduce_stake(reporter, amount)`.
+- **Cause:** `amount` is zero or negative, or adding `amount` to the existing
+  stake would overflow `i128`.
+- **Remedy:** Pass a strictly positive `amount` within `i128` bounds.
+
+### 7 `InsufficientStake`
+
+- **Raised by:** `reduce_stake(reporter, amount)`.
+- **Cause:** `amount` exceeds the reporter's currently tracked stake (`stake_of`).
+- **Remedy:** Query `stake_of(reporter)` and reduce by at most that amount.
+
 ## LedgerError
 
 Raised by `coverage-ledger`. Each write checks its errors in a fixed order, so

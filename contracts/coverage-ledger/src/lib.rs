@@ -258,6 +258,17 @@ fn require_listed(env: &Env, sac: &Address) -> AssetRecord {
     }
 }
 
+/// Check that `sac` is listed without deserialising its `AssetRecord`.
+fn ensure_listed(env: &Env, sac: &Address) {
+    let key = DataKey::Asset(sac.clone());
+    if !env.storage().persistent().has(&key) {
+        panic_with_error!(env, LedgerError::AssetNotListed);
+    }
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+}
+
 /// Split a Stellar Asset Contract name (`CODE:GISSUER...`) into code and
 /// issuer. Returns `None` for `native` or anything malformed.
 fn parse_sac_name(env: &Env, name: &String) -> Option<(String, Address)> {
@@ -406,12 +417,7 @@ fn posted_supply_at_ledger(env: &Env, sac: &Address, as_of_ledger: u32) -> Optio
 /// asset record. A revoked auditor or transcriber, or one whose role changed,
 /// no longer speaks for the figures they posted.
 fn counts(registry: &RegistryClient, report: &ReserveReport) -> bool {
-    let needed = match report.tier {
-        Tier::IssuerSigned => return true,
-        Tier::AuditorSigned => Role::Auditor,
-        Tier::Transcribed => Role::Transcriber,
-    };
-    registry.role_of(&report.reporter) == Some(needed)
+    counts_for_tier(registry, report.tier, &report.reporter)
 }
 
 /// The freshest counting report in `candidates`.
@@ -501,11 +507,8 @@ fn reclaim_slots(
     let mut kept = Vec::new(env);
     for reporter in index.iter() {
         let key = DataKey::ReportBy(sac.clone(), tier, reporter.clone());
-        let keep = env
-            .storage()
-            .persistent()
-            .get::<_, ReserveReport>(&key)
-            .is_some_and(|report| counts(registry, &report));
+        let keep =
+            env.storage().persistent().has(&key) && counts_for_tier(registry, tier, &reporter);
         if keep {
             kept.push_back(reporter);
         } else {
@@ -579,7 +582,7 @@ impl CoverageLedger {
         if role != Some(Role::SupplyPoster) {
             panic_with_error!(&env, LedgerError::NotSupplyPoster);
         }
-        require_listed(&env, &sac);
+        ensure_listed(&env, &sac);
         if amount < 0 {
             panic_with_error!(&env, LedgerError::InvalidAmount);
         }
@@ -797,8 +800,8 @@ impl CoverageLedger {
         if old == new {
             panic_with_error!(&env, LedgerError::SelfAlias);
         }
-        require_listed(&env, &old);
-        require_listed(&env, &new);
+        ensure_listed(&env, &old);
+        ensure_listed(&env, &new);
         write_persistent(&env, &DataKey::Alias(old.clone()), &new);
         bump_instance(&env);
         AssetAliased { old, new }.publish(&env);
@@ -1047,7 +1050,7 @@ impl CoverageLedger {
     /// the posted snapshot. The snapshot is kept as the fallback.
     pub fn enable_native_supply(env: Env, sac: Address, token: Address) {
         admin(&env).require_auth();
-        require_listed(&env, &sac);
+        ensure_listed(&env, &sac);
         write_persistent(&env, &DataKey::NativeSupply(sac.clone()), &token);
         bump_instance(&env);
         NativeSupplyEnabled { sac, token }.publish(&env);
